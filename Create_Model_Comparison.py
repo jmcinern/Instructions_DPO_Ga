@@ -30,11 +30,17 @@ else:
 # 4) get "text" column as list and randomly take 10 samples under 1000 chars
 ds_short = ds_gawiki.filter(lambda ex: isinstance(ex.get("text", None), str) and len(ex["text"]) < 1000)
 ds_short = ds_short.shuffle(seed=42)
-n = min(10, len(ds_short))
+n = min(70, len(ds_short))
 texts = ds_short.select(range(n))["text"]
 
-# 5) save to file separated by \n\n\n
-with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
-    f.write("\n\n\n".join(t.strip() for t in texts if isinstance(t, str)))
+# save two samples of 50 texts for test1 and  20 test fortest2
+wiki_1 = texts[:50]
+wiki_2 = texts[50:70]
 
-print(f"Wrote {n} samples to {OUTPUT_TXT}")
+# save to folder seed_data, wiki_test1.txt and wiki_test2.txt
+os.makedirs("seed_data", exist_ok=True)
+with open("seed_data/wiki_test1.txt", "w", encoding="utf-8") as f:
+    f.write("\n\n\n".join(wiki_1)) 
+
+with open("seed_data/wiki_test2.txt", "w", encoding="utf-8") as f:
+    f.write("\n\n\n".join(wiki_2))
