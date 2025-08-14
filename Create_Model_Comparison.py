@@ -17,11 +17,7 @@ else:
     else:
         ds_all = ds  # already a single Dataset
 
-    # pint columnn names and their set of unique values
-    print("Column names and unique values:")
-    for column in ds_all.column_names:
-        unique_values = set(ds_all[column])
-        print(f"{column}: {unique_values}")
+    
     # 3) filter to only id == "Gawikipedia"
     ds_gawiki = ds_all.filter(lambda ex: ex["id"] == "Gawikipedia")
 
@@ -29,6 +25,12 @@ else:
     os.makedirs(os.path.dirname(CACHE_DIR), exist_ok=True)
     ds_gawiki.save_to_disk(CACHE_DIR)
 
+
+# pint columnn names and their set of unique values
+    print("Column names and unique values:")
+    for column in ds_all.column_names:
+        unique_values = set(ds_all[column])
+        print(f"{column}: {unique_values}")
 # 4) get "text" column as list and take 5 samples (first 5)
 n = min(5, len(ds_gawiki))
 texts = ds_gawiki.select(range(n))["text"]
