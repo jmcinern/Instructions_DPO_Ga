@@ -7,7 +7,7 @@ df = df[df["lang"] == "ga"]
 # get list of text
 text_list = df["text"].tolist()
 # filter by >100 chars and <1000
-text_list = [text for text in text_list if len(text) > 100]
+text_list = [text for text in text_list if len(text) > 100 and len(text) < 1000]
 print(f"Number of texts: {len(text_list)}")
 # save to txt
 with open("ga_texts.txt", "w", encoding="utf-8") as f:
