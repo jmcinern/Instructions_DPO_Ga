@@ -7,6 +7,7 @@ CACHE_DIR = os.path.join("cache", "gawikipedia")
 # Load from cache if available
 if os.path.isdir(CACHE_DIR):
     ds_gawiki = load_from_disk(CACHE_DIR)
+    print(f"Loaded cached dataset from {CACHE_DIR}")
 else:
     # 1) import dataset
     ds = load_dataset("ReliableAI/Irish-Text-Collection")
@@ -26,7 +27,7 @@ else:
     ds_gawiki.save_to_disk(CACHE_DIR)
 
 
-# pint columnn names and their set of unique values
+# print columnn names and their set of unique values
     print("Column names and unique values:")
     for column in ds_all.column_names:
         unique_values = set(ds_all[column])
