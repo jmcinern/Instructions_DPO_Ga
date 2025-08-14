@@ -11,16 +11,13 @@ if os.path.isdir(CACHE_DIR):
 else:
     # 1) import dataset
     ds = load_dataset("ReliableAI/Irish-Text-Collection")
-    # print columnn names and their set of unique values
-    print("Column names and unique values:")
-    for column in ds.column_names:
-        unique_values = set(ds[column])
-        print(f"{column}: {unique_values}")
 
 
     # 2) combine available splits into one dataset
     if isinstance(ds, DatasetDict):
         ds_all = concatenate_datasets([ds[split] for split in ds.keys()])
+        id_values = ds_all.unique("id")
+        print(id_values)
     else:
         ds_all = ds  # already a single Dataset
 
