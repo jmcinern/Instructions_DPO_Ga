@@ -6,7 +6,7 @@ df = pd.read_csv(path, nrows=10_000)
 df = df[df["lang"] == "ga"]
 # get list of text
 text_list = df["text"].tolist()
-# filter by >100 chars
+# filter by >100 chars and <1000
 text_list = [text for text in text_list if len(text) > 100]
 print(f"Number of texts: {len(text_list)}")
 # save to txt
