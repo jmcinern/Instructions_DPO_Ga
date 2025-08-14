@@ -38,4 +38,4 @@ texts = ds_gawiki.select(range(n))["text"]
 with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
     f.write("\n\n\n".join(t.strip() for t in texts if isinstance(t, str)))
 
-print(f"Wrote {n} samples
+print(f"Wrote {n} samples to {OUTPUT_TXT}")
