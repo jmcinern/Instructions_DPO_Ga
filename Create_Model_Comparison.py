@@ -30,8 +30,8 @@ else:
 
 # print columnn names and their set of unique values
 print("Column names and unique values:")
-for column in ds_all.column_names:
-    unique_values = set(ds_all[column])
+for column in ds_gawiki.column_names:
+    unique_values = set(ds_gawiki[column])
     print(f"{column}: {unique_values}")
 # 4) get "text" column as list and take 5 samples (first 5)
 n = min(5, len(ds_gawiki))
