@@ -17,6 +17,11 @@ else:
     else:
         ds_all = ds  # already a single Dataset
 
+    # pint columnn names and their set of unique values
+    print("Column names and unique values:")
+    for column in ds_all.column_names:
+        unique_values = set(ds_all[column])
+        print(f"{column}: {unique_values}")
     # 3) filter to only id == "Gawikipedia"
     ds_gawiki = ds_all.filter(lambda ex: ex["id"] == "Gawikipedia")
 
