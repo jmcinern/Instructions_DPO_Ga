@@ -10,6 +10,6 @@ text_list = df["text"].tolist()
 text_list = [text for text in text_list if len(text) > 100]
 print(f"Number of texts: {len(text_list)}")
 # save to txt
-with open("out/ga_texts.txt", "w", encoding="utf-8") as f:
+with open("ga_texts.txt", "w", encoding="utf-8") as f:
     f.writelines("\n\n\n".join(text_list))
 # manually choose 10 examples
