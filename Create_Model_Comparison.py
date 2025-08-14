@@ -27,9 +27,11 @@ else:
     ds_gawiki.save_to_disk(CACHE_DIR)
     print(f"Saved subset to cache: {CACHE_DIR}")
 
-# 4) get "text" column as list and take 5 samples (first 5)
-n = min(5, len(ds_gawiki))
-texts = ds_gawiki.select(range(n))["text"]
+# 4) get "text" column as list and randomly take 10 samples under 1000 chars
+ds_short = ds_gawiki.filter(lambda ex: isinstance(ex.get("text", None), str) and len(ex["text"]) < 1000)
+ds_short = ds_short.shuffle(seed=42)
+n = min(10, len(ds_short))
+texts = ds_short.select(range(n))["text"]
 
 # 5) save to file separated by \n\n\n
 with open(OUTPUT_TXT, "w", encoding="utf-8") as f:
