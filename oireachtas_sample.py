@@ -13,17 +13,14 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Config
 # Prefer absolute path; fallback to local file if not found
-INPUT_CSV = os.path.expanduser(r"~/code/Oireachtas_Collect_Analyse/debates_all_with_lang.csv")
-if not os.path.isfile(INPUT_CSV):
-    INPUT_CSV = "debates_all_with_lang.csv"
-
+INPUT_CSV = "./debates_all_with_lang.csv"
 SEED = 42
 CHUNKSIZE = 100_000
-SAMPLE_SIZE = 70
+SAMPLE_SIZE = 160
 MAX_CHARS = 1000  # keep texts under 1000 chars (like gawiki_sample.py)
 SEED_DIR = "seed_data"
-OUT1 = os.path.join(SEED_DIR, "oireachtas_test1.txt")  # 50 texts
-OUT2 = os.path.join(SEED_DIR, "oireachtas_test2.txt")  # 20 texts
+OUT1 = os.path.join(SEED_DIR, "oireachtas_test1.txt")  # 120 texts
+OUT2 = os.path.join(SEED_DIR, "oireachtas_test2.txt")  # 40 texts
 
 random.seed(SEED)
 os.makedirs(SEED_DIR, exist_ok=True)
@@ -78,8 +75,8 @@ def main():
     # Final sampled texts
     sampled = reservoir[:SAMPLE_SIZE]
     # Split into 50 and 20
-    part1 = sampled[:50]
-    part2 = sampled[50:70]
+    part1 = sampled[:120]
+    part2 = sampled[120:160]
 
     with open(OUT1, "w", encoding="utf-8") as f:
         f.write("\n\n\n".join(part1))

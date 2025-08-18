@@ -2,7 +2,7 @@ import os
 from datasets import load_dataset, DatasetDict, concatenate_datasets, load_from_disk
 
 
-OUTPUT_TXT = "gawiki_5_samples.txt"
+OUTPUT_TXT = "gawiki_samples.txt"
 CACHE_DIR = os.path.join("cache", "gawiki")
 
 def is_gawiki(example):
@@ -31,12 +31,12 @@ else:
 # 4) get "text" column as list and randomly take 10 samples under 1000 chars
 ds_short = ds_gawiki.filter(lambda ex: isinstance(ex.get("text", None), str) and len(ex["text"]) < 1000)
 ds_short = ds_short.shuffle(seed=42)
-n = min(70, len(ds_short))
+n = min(120, len(ds_short))
 texts = ds_short.select(range(n))["text"]
 
-# save two samples of 50 texts for test1 and  20 test fortest2
-wiki_1 = texts[:50]
-wiki_2 = texts[50:70]
+# save two samples of 120 texts for test1 and  40 test fortest2
+wiki_1 = texts[:120]
+wiki_2 = texts[120:160]
 
 # save to folder seed_data, wiki_test1.txt and wiki_test2.txt
 os.makedirs("seed_data", exist_ok=True)
