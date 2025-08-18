@@ -31,7 +31,7 @@ else:
 # 4) get "text" column as list and randomly take 10 samples under 1000 chars
 ds_short = ds_gawiki.filter(lambda ex: isinstance(ex.get("text", None), str) and len(ex["text"]) > 200 and len(ex["text"]) < 1000)
 ds_short = ds_short.shuffle(seed=42)
-n = min(120, len(ds_short))
+n = min(160, len(ds_short))
 texts = ds_short.select(range(n))["text"]
 
 # save two samples of 120 texts for test1 and  40 test fortest2
