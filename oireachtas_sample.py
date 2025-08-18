@@ -17,6 +17,7 @@ INPUT_CSV = "./debates_all_with_lang.csv"
 SEED = 42
 CHUNKSIZE = 100_000
 SAMPLE_SIZE = 160
+MIN_CHARS = 200  # minimum chars per text
 MAX_CHARS = 1000  # keep texts under 1000 chars (like gawiki_sample.py)
 SEED_DIR = "seed_data"
 OUT1 = os.path.join(SEED_DIR, "oireachtas_test1.txt")  # 120 texts
@@ -33,7 +34,7 @@ def filter_chunk(df: pd.DataFrame) -> list[str]:
     for t in df:
         if isinstance(t, str):
             t = t.strip()
-            if t and len(t) <= MAX_CHARS:
+            if t and len(t) <= MAX_CHARS  and len(t) >= MIN_CHARS:
                 out.append(t)
     return out
 
