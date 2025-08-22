@@ -1,59 +1,74 @@
-# Goal: To Create both and instruction following and human preference data set for Irish. This would be a first of its kind for the Irish language.
+## Instruction_DPO_Ga (Model Ranking & Experiment Submodule)
 
-## Current Plan
+Pipeline for creating Irish (Gaeilge) instruction & preference data via:
+- Sampling Oireachtas debates + GaWiki text
+- Multi‑model instruction/response synthesis (OpenAI / Anthropic / Google etc.)
+- Human + LLM pairwise annotation (A/B)
+- Bradley–Terry ranking to determine best model for Irish text generation.
+- Analyse interannotator agreement statistics, to evaluate LLM/Learner capabilities in comparison to native.
+- (Planned) Use the winning model to generate Irish instruction tuning data.
 
-Date: 14/08/2025
-Project Plan: 
-Context: I am developing an LLM for Irish. I have already continued pre-training on Irish data. I now want to create an Instruction Tuning data set and a human preference data set. I will use another LLM to generate prompt-response pairs. To prompt this LLM, I will provide reference text. I have text from Irish Wikipedia and Oireachtas debates.
+### Goals
+1. Select best base generator (model + price tier) for large scale Irish data synthesis.
+2. Compare reference sources (Oireachtas vs Wikipedia) for instruction grounding quality.
+3. Validate substitutability of Learner / LLM annotators vs Native speakers (agreement metrics).
 
-Constraints:
-- Report due 05/09/2025 so only 3 Weeks to finish, most models have timed usage limit rates.
-- Cost of data synthesis
+### Core Scripts
+| Script | Purpose |
+|--------|---------|
+| `download_oireachtas.py` | Fetch debate CSV (with language column) from Hugging Face. |
+| `gawiki_sample.py` | Cache + sample GaWiki subset (id prefix filter) into seed text files. |
+| `oireachtas_sample.py` | Reservoir sample Irish debate lines (len ≤1000) into test splits. |
+| `Create_Model_Comparison.py` | Generate instruction–response rows across models; logs CSV (now with `source_text`). |
+| `gpt4o_annotation.py` | Automated LLM pair annotation (A/B). |
+| `human_feedback.py` | Gradio UI for human pairwise annotation (remove deprecated `sharing=` param). |
+| `Bradley_Terry.py` | Bradley–Terry ranking + win probability matrices + (optional) kappa. |
+| `DPO.py` | Placeholder for Direct Preference Optimization training stage. |
 
-Key Questions of experiment:
-1) Which LLM is best at generating Irish text?
-	- This model will then be used for larger scale instruction-tuning and human feedback data synthesis.
-2) Is Wikipedia or Oireachtas more useful as a source for reference text? 
-	- This source will then be used to seed the reference text for the data synthesis.
-	
-Experiment Outline:
+### Data Flow Overview
+1. Acquire debate data (`download_oireachtas.py`).
+2. Sample GaWiki + Oireachtas seed corpora (`gawiki_sample.py`, `oireachtas_sample.py`).
+3. Generate model outputs (`Create_Model_Comparison.py`) → CSV with per‑row `instruction`, `response`, `source_text`.
+4. Construct comparison pairs + annotate (`gpt4o_annotation.py`, `human_feedback.py`).
+5. Aggregate & rank (`Bradley_Terry.py`).
+6. (Future) Train DPO model using ranked preferences (`DPO.py`).
 
-10 models / 2 refence sources => 5 main models flagship&cheaper, GPT, Claude, Gemini, Llama, Qwen.
+### Annotation Strategy
+- Annotator types: Native, Learner, GPT‑4o (LLM), Tester (internal/debug).
+- A/B comparisons recorded with choice (A/B) plus metadata.
+- Bradley–Terry scores -> win probabilities -> ordering.
+- Agreement: Cohen’s kappa / pairwise alignment to justify scalable annotators.
 
-instruction-tuning prompt template for the synthesising LLM:
-TASK DESCRIPTION
+### Prompt Template (Synthesis)
+```
 You are given an Irish text source: {TEXT}
-YOUR JOB:
-Generate an instruction–response pair based on the provided text.
-ALLOWED QUESTION TYPES
-Is it true that ...
-Explain ...
-Describe ...
-List the steps ...
-REQUIREMENTS
-The instruction must clearly incorporate the context from the provided text.
-The response must be accurate and entirely in Irish.
-Output only the instruction–response pair.
-OUTPUT FORMAT
+Generate an instruction–response pair grounded ONLY in that text.
+Allowed question styles: “Is it true that…”, “Explain…”, “Describe…”, “List the steps…”.
+Both instruction and response must be fully in Irish and factually consistent.
+Format exactly:
 Instruction: <instruction in Irish>
 Response: <response in Irish>
+```
 
+### Sampling Parameters
+- GaWiki: Filter id prefix `Gawiki`, length <1000 chars, shuffled, two splits (test1/test2).
+- Oireachtas: Reservoir sample 70 Irish (`lang == ga`) lines (len ≤1000) into 50/20 splits.
 
-Plan Continued:
-10 responses per dimension - 200 samples. 10 samples X 5 models X two price-points X two reference sources
-A/B testing (gradio), will need to set up a gradio application to allow for easy annotation.
-Test 1: 50/50 Source, vary model
-Test 2: Fix best Model -> 40 samples 20/20
+### Generated CSV Columns
+`run_id, model, source_type, source_text, instruction, response`
 
+### Bradley–Terry Notes
+- Convert A/B pairs to win–loss list.
+- Fit via `choix.opt_pairwise` (logistic BT).
+- Produce probability matrix P(i beats j).
+- Skip sparse annotators (< threshold) if desired.
 
-Annotators:
-GPT-4 (LLM) -> will need to run this automatically
-Me (Learner of Irish)
-Native Speaker
+### Gradio App Note
+If encountering: `TypeError: Blocks.launch() got an unexpected keyword argument 'sharing'` → remove `sharing=` and use `share=True` only when needed.
 
-- Compare ranking of (model,price,source)
-	- Select highest ranked
-	
-- Compare alignment of LLM, Me and Native.
-	- Can use this to justidy use of Me/LLM instead of Native for subsequent human feedback annotation.
-	
+### SLURM (`slurm.sh`)
+Template for cluster execution; edit partition, time, memory, env activation. Typical usage:
+```bash
+sbatch slurm.sh
+```
+
