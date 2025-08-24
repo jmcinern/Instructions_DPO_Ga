@@ -11,12 +11,13 @@ Key: (source_type, text_hash, model_A, model_B, annotator_type)
 Aggregate_LLM only when all 3 individual LLM votes exist.
 Prompt body unchanged.
 """
-
 from __future__ import annotations
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel
 import argparse, json, os, sys, time, hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import random
 import pandas as pd
 from tqdm import tqdm
@@ -29,14 +30,15 @@ except ImportError:
 
 from openai import OpenAI
 import anthropic
-import google.generativeai as genai
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import threading
+from collections import defaultdict
 
 # Add lock for thread-safe operations
 lock = threading.Lock()
-
+progress_lock = threading.Lock()
+push_lock = threading.Lock()
 
 # ---------------- CONFIG ----------------
 PAIRS_CSV = Path("outputs/pairs.csv")
@@ -45,7 +47,7 @@ HF_REPO = "jmcinern/Irish_Prompt_Response_Human_Feedback"
 HF_FILENAME = "annotations_Wiki_Native.csv"
 
 OPENAI_VOTE_MODEL = "gpt-5"
-GEMINI_VOTE_MODEL =  "gemini-1.5-pro-latest" # "gemini-2.5-pro"
+GEMINI_VOTE_MODEL =  "gemini-2.5-pro" # "gemini-2.5-pro"
 ANTHROPIC_VOTE_MODEL = "claude-sonnet-4-20250514"
 
 LLM_ANNOTATORS = ["GPT_5", "Gemini_2_5_Pro", "Claude_Sonnet_4"]
@@ -53,6 +55,10 @@ AGG_ANNOTATOR = "Aggregate_LLM"
 
 RETRY_MAX = 2
 RETRY_SLEEP = 2.0
+
+# Number of worker threads per LLM provider
+WORKERS_PER_LLM = 3
+MAX_TOTAL_WORKERS = 12
 
 # ------------- Utils -------------
 def sha1_short(t: str, length: int = 16) -> str:
@@ -189,9 +195,7 @@ Answer:
 
 # ---------- Structured vote (no heuristic fallback) ----------
 
-
 def openai_vote(client: OpenAI, model: str, prompt: str) -> Optional[str]:
-    
     resp = client.responses.create(
         model=model,
         reasoning={"effort": "low"},
@@ -199,8 +203,6 @@ def openai_vote(client: OpenAI, model: str, prompt: str) -> Optional[str]:
         input=prompt,
     )
     print(f"OpenAI response: {resp.output_text}")
-    #resp = resp.output_text
-    
     v = resp.output_text.strip().upper()
     return v if v in ("A", "B") else None
 
@@ -232,41 +234,82 @@ def anthropic_vote(client: anthropic.Anthropic, model: str, prompt: str) -> Opti
     print("[WARN] Anthropic structured vote missing")
     return None
 
-# Gemini vote
-# Replace your entire gemini_vote function with this one.
-
-def gemini_vote(model_obj: genai.GenerativeModel, prompt: str) -> Optional[str]:
+def gemini_vote(model_obj: GenerativeModel, prompt: str) -> Optional[str]:
     """
     Calls Gemini for standard text generation using a GenerativeModel object.
     This now exactly matches the pattern from the successful test script.
     """
     try:
-        # The API call is now directly on the model object
-        r = model_obj.generate_content(prompt)
-        raw_text = r.text
+        gemini_project_id = "gen-lang-client-0817118952" 
+        gcloud_location = "us-central1"
 
-        # Clean and parse the response
-        clean_vote = raw_text.strip().upper()
-        if clean_vote in ("A", "B"):
-            return clean_vote
-        else:
-            print(f"[WARN] Gemini vote parse failed. Raw output: {raw_text!r}")
-            return None
-    except Exception as e:
-        # Let the call_with_retry wrapper handle printing the error
-        # by re-raising the exception.
-        raise e
+        vertexai.init(project=gemini_project_id, location=gcloud_location)
+
+        model = GenerativeModel('gemini-2.5-pro')
+        response = model.generate_content(prompt)
+
+        return response.text or None
+
+    except:
+        print(f"[WARN] Gemini vote parse failed. Raw output: {response!r}")
+        return None
+
 
 def majority_three(votes: List[str]) -> Optional[str]:
     if len(votes) != 3 or any(v not in ("A","B") for v in votes): return None
     return "A" if votes.count("A") > votes.count("B") else "B"
 
-def process_model_vote(args: dict, annotator: str, base: dict, prompt: str,
-                     openai_client: OpenAI, anthro_client: anthropic.Anthropic,
-                     gemini_model: genai.GenerativeModel) -> Optional[dict]:
-    """Thread-safe model voting processor"""
+def push_to_hf(df: pd.DataFrame, hf_token: str, message: str = "Incremental update") -> bool:
+    """
+    Push the current dataframe to Hugging Face.
+    Returns True if successful, False otherwise.
+    """
     try:
-        vote = None
+        # Save locally first
+        tmp = ANNOT_CSV_LOCAL.with_suffix(".tmp.csv")
+        df.to_csv(tmp, index=False)
+        tmp.replace(ANNOT_CSV_LOCAL)
+        
+        # Push to HF
+        api = HfApi()
+        create_repo(HF_REPO, repo_type="dataset", exist_ok=True, token=hf_token)
+        api.upload_file(
+            path_or_fileobj=str(ANNOT_CSV_LOCAL),
+            path_in_repo=HF_FILENAME,
+            repo_id=HF_REPO,
+            repo_type="dataset",
+            token=hf_token,
+            commit_message=message
+        )
+        return True
+    except Exception as e:
+        print(f"[WARN] Push to HF failed: {e}")
+        return False
+
+def process_single_llm_vote(
+    annotator: str,
+    base: dict,
+    prompt: str,
+    existing_keys: set,
+    openai_client: Optional[OpenAI],
+    anthro_client: Optional[anthropic.Anthropic],
+    gemini_model: Optional[GenerativeModel],
+    pbar: tqdm
+) -> Optional[Tuple[str, dict]]:
+    """
+    Process a single LLM vote and update progress bar.
+    Returns (annotator_type, result_dict) or None
+    """
+    k = vote_key(base, annotator)
+    
+    # Skip if already exists
+    if k in existing_keys:
+        with progress_lock:
+            pbar.update(1)
+        return None
+    
+    vote = None
+    try:
         if annotator == "GPT_5":
             vote = call_with_retry(
                 "GPT_5", 
@@ -282,27 +325,29 @@ def process_model_vote(args: dict, annotator: str, base: dict, prompt: str,
                 "Claude_Sonnet_4",
                 lambda: anthropic_vote(anthro_client, ANTHROPIC_VOTE_MODEL, prompt)
             )
-        
-        if vote not in ("A", "B"):
-            return None
-
-        with lock:
-            return {
-                "annotator_type": annotator,
-                "base": base,
-                "vote": vote,
-                "timestamp": utc_timestamp()
-            }
-    except Exception as e:
-        print(f"[ERROR] {annotator} processing failed for {base['text_hash']}: {str(e)}")
-        return None
+    finally:
+        # Always update progress bar
+        with progress_lock:
+            pbar.update(1)
     
+    if vote in ("A", "B"):
+        return (annotator, {
+            "annotator_type": annotator,
+            **base,
+            "choice": vote,
+            "timestamp": utc_timestamp()
+        })
+    
+    return None
+
 # ------------- Main -------------
 def main():
     parser = argparse.ArgumentParser(description="Structured LLM voting (Gemini logic mirrored).")
     parser.add_argument("--limit", type=int, default=None, help="Limit pending comparisons")
     parser.add_argument("--dry-run", action="store_true", help="Plan only (no API / write / push)")
     parser.add_argument("--overwrite-llm", action="store_true", help="Re-annotate existing LLM votes")
+    parser.add_argument("--push-interval", type=int, default=50, 
+                       help="Push to HF every N annotations (default: 50, 0 = only push at end)")
     args = parser.parse_args()
 
     secrets = load_secrets()
@@ -318,8 +363,7 @@ def main():
     openai_client = OpenAI(api_key=open_ai_key)
     anthro_client = anthropic.Anthropic(api_key=anthropic_key)
     
-    genai.configure(api_key=google_key)  # Use configure instead of Client()
-    gemini_model_obj = genai.GenerativeModel(GEMINI_VOTE_MODEL) # Create the model object once
+    gemini_model_obj = GenerativeModel('gemini-2.5-pro')
 
 
     existing_df = download_existing()
@@ -342,6 +386,7 @@ def main():
         f"{r.source_type}||{r.text_hash}||{r.model_A}||{r.model_B}||{r.annotator_type}"
         for r in existing_long.itertuples()
     )
+    existing_keys_copy = existing_keys.copy()  # Thread-safe copy
 
     pairs_df = load_pairs()
     comp_df = build_comparisons(pairs_df)
@@ -378,6 +423,8 @@ def main():
     print(f"Total comparisons: {len(comp_df)}")
     print(f"Pending needing LLM votes: {total_pending}")
     print(f"Selected this run: {len(pending)} (limit={'none' if args.limit is None else args.limit})")
+    if args.push_interval > 0:
+        print(f"Will push to HF every {args.push_interval} annotations")
 
     if args.dry_run:
         print("DRY RUN sample (≤5):")
@@ -396,6 +443,7 @@ def main():
                 k for k in existing_keys
                 if not any(k.startswith(f"{ck}||") for ck in comp_keys)
             }
+            existing_keys_copy = existing_keys.copy()
         print(f"Overwrite removed {removed} existing LLM/aggregate rows.")
 
     per_llm_stats = {a: {"A":0,"B":0} for a in LLM_ANNOTATORS}
@@ -404,91 +452,146 @@ def main():
     aggregates_added = 0
     aggregates_skipped = 0
     new_rows: List[Dict[str,str]] = []
+    
+    # Tracking for incremental pushes
+    annotations_since_push = 0
+    total_pushes = 0
 
-    for base in tqdm(pending, desc="Annotating", unit="cmp"):
-        prompt = build_vote_prompt(
-            source_text=base["text"],
-            model_A=base["model_A"],
-            instr_A=base["instruction_A"],
-            resp_A=base["response_A"],
-            model_B=base["model_B"],
-            instr_B=base["instruction_B"],
-            resp_B=base["response_B"]
-        )
+    # Calculate total tasks for each LLM
+    tasks_per_llm = defaultdict(int)
+    for base in pending:
+        for annot in LLM_ANNOTATORS:
+            k = vote_key(base, annot)
+            if k not in existing_keys_copy:
+                tasks_per_llm[annot] += 1
 
-        votes = {}
-        if not overwrite:
+    # Create progress bars for each LLM
+    pbar_gpt = tqdm(total=tasks_per_llm["GPT_5"], desc="GPT-5", unit="votes", position=0)
+    pbar_gemini = tqdm(total=tasks_per_llm["Gemini_2_5_Pro"], desc="Gemini 2.5 Pro", unit="votes", position=1)
+    pbar_claude = tqdm(total=tasks_per_llm["Claude_Sonnet_4"], desc="Claude Sonnet 4", unit="votes", position=2)
+    
+    pbar_map = {
+        "GPT_5": pbar_gpt,
+        "Gemini_2_5_Pro": pbar_gemini,
+        "Claude_Sonnet_4": pbar_claude
+    }
+
+    # Process all comparisons with parallel LLM calls
+    with ThreadPoolExecutor(max_workers=MAX_TOTAL_WORKERS) as executor:
+        for base in pending:
+            prompt = build_vote_prompt(
+                source_text=base["text"],
+                model_A=base["model_A"],
+                instr_A=base["instruction_A"],
+                resp_A=base["response_A"],
+                model_B=base["model_B"],
+                instr_B=base["instruction_B"],
+                resp_B=base["response_B"]
+            )
+
+            # Check for existing votes (if not overwriting)
+            votes = {}
+            if not overwrite:
+                for annot in LLM_ANNOTATORS:
+                    k = vote_key(base, annot)
+                    if k in existing_keys:
+                        row_match = existing_df[
+                            (existing_df["annotator_type"] == annot) &
+                            (existing_df["source_type"] == base["source_type"]) &
+                            (existing_df["text_hash"] == base["text_hash"]) &
+                            (existing_df["model_A"] == base["model_A"]) &
+                            (existing_df["model_B"] == base["model_B"])
+                        ]
+                        if not row_match.empty:
+                            cv = row_match.iloc[0]["choice"]
+                            if cv in ("A","B"):
+                                votes[annot] = cv
+
+            # Submit all LLM tasks in parallel
+            futures = []
             for annot in LLM_ANNOTATORS:
-                k = vote_key(base, annot)
-                if k in existing_keys:
-                    row_match = existing_df[
-                        (existing_df["annotator_type"] == annot) &
-                        (existing_df["source_type"] == base["source_type"]) &
-                        (existing_df["text_hash"] == base["text_hash"]) &
-                        (existing_df["model_A"] == base["model_A"]) &
-                        (existing_df["model_B"] == base["model_B"])
-                    ]
-                    if not row_match.empty:
-                        cv = row_match.iloc[0]["choice"]
-                        if cv in ("A","B"):
-                            votes[annot] = cv
+                if annot not in votes:
+                    future = executor.submit(
+                        process_single_llm_vote,
+                        annot,
+                        base,
+                        prompt,
+                        existing_keys_copy,
+                        openai_client if annot == "GPT_5" else None,
+                        anthro_client if annot == "Claude_Sonnet_4" else None,
+                        gemini_model_obj if annot == "Gemini_2_5_Pro" else None,
+                        pbar_map[annot]
+                    )
+                    futures.append(future)
 
-        # GPT_5
-        if "GPT_5" not in votes:
-            k = vote_key(base,"GPT_5")
-            if k not in existing_keys:
-                v = call_with_retry("GPT_5", lambda: openai_vote(openai_client, OPENAI_VOTE_MODEL, prompt))
-                if v in ("A","B"):
-                    votes["GPT_5"]=v
-                    per_llm_stats["GPT_5"][v]+=1
-                    structured_success["GPT_5"]+=1
-                    new_rows.append({"annotator_type":"GPT_5", **base, "choice":v, "timestamp":utc_timestamp()})
-                    existing_keys.add(k)
+            # Collect results
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    annot_type, row_data = result
+                    votes[annot_type] = row_data["choice"]
+                    per_llm_stats[annot_type][row_data["choice"]] += 1
+                    structured_success[annot_type] += 1
+                    
+                    with lock:
+                        new_rows.append(row_data)
+                        existing_keys.add(vote_key(base, annot_type))
+                        existing_keys_copy.add(vote_key(base, annot_type))
+                        annotations_since_push += 1
                 else:
-                    structured_fail["GPT_5"]+=1
+                    # Track failures
+                    for annot in LLM_ANNOTATORS:
+                        if annot not in votes:
+                            structured_fail[annot] += 1
 
-        # Gemini (EXACT pattern style)
-        if "Gemini_2_5_Pro" not in votes:
-            k = vote_key(base,"Gemini_2_5_Pro")
-            if k not in existing_keys:
-                v = call_with_retry(
-                    "Gemini_2_5_Pro",
-                    lambda: gemini_vote(gemini_model_obj, prompt)
-                )
-                if v in ("A","B"):
-                    votes["Gemini_2_5_Pro"]=v
-                    per_llm_stats["Gemini_2_5_Pro"][v]+=1
-                    structured_success["Gemini_2_5_Pro"]+=1
-                    new_rows.append({"annotator_type":"Gemini_2_5_Pro", **base, "choice":v, "timestamp":utc_timestamp()})
-                    existing_keys.add(k)
-                else:
-                    structured_fail["Gemini_2_5_Pro"]+=1
+            # Check for aggregate
+            if all(a in votes for a in LLM_ANNOTATORS):
+                agg = majority_three([votes[a] for a in LLM_ANNOTATORS])
+                if agg:
+                    k_agg = vote_key(base, AGG_ANNOTATOR)
+                    if k_agg not in existing_keys:
+                        with lock:
+                            new_rows.append({
+                                "annotator_type": AGG_ANNOTATOR,
+                                **base,
+                                "choice": agg,
+                                "timestamp": utc_timestamp()
+                            })
+                            existing_keys.add(k_agg)
+                            existing_keys_copy.add(k_agg)
+                            annotations_since_push += 1
+                        aggregates_added += 1
+            else:
+                aggregates_skipped += 1
 
-        # Claude
-        if "Claude_Sonnet_4" not in votes:
-            k = vote_key(base,"Claude_Sonnet_4")
-            if k not in existing_keys:
-                v = call_with_retry("Claude_Sonnet_4", lambda: anthropic_vote(anthro_client, ANTHROPIC_VOTE_MODEL, prompt))
-                if v in ("A","B"):
-                    votes["Claude_Sonnet_4"]=v
-                    per_llm_stats["Claude_Sonnet_4"][v]+=1
-                    structured_success["Claude_Sonnet_4"]+=1
-                    new_rows.append({"annotator_type":"Claude_Sonnet_4", **base, "choice":v, "timestamp":utc_timestamp()})
-                    existing_keys.add(k)
-                else:
-                    structured_fail["Claude_Sonnet_4"]+=1
+            # Check if we should push to HF
+            if args.push_interval > 0 and annotations_since_push >= args.push_interval:
+                with push_lock:
+                    if annotations_since_push >= args.push_interval:  # Double-check after lock
+                        # Update dataframe with new rows
+                        current_df = pd.concat([existing_df, pd.DataFrame(new_rows)], ignore_index=True)
+                        
+                        # Reorder columns
+                        front = required_cols
+                        trailing = [c for c in current_df.columns if c not in front]
+                        current_df = current_df[front + trailing]
+                        
+                        # Push to HF
+                        if push_to_hf(current_df, hf_token, 
+                                    f"Incremental update: {len(new_rows)} annotations added"):
+                            total_pushes += 1
+                            print(f"\n[PUSH {total_pushes}] Pushed {len(new_rows)} annotations to HF "
+                                  f"(total: {len(current_df)} rows)")
+                            # Update existing_df to include new rows
+                            existing_df = current_df
+                            annotations_since_push = 0
 
-        if all(a in votes for a in LLM_ANNOTATORS):
-            agg = majority_three([votes[a] for a in LLM_ANNOTATORS])
-            if agg:
-                k_agg = vote_key(base, AGG_ANNOTATOR)
-                if k_agg not in existing_keys:
-                    new_rows.append({"annotator_type":AGG_ANNOTATOR, **base, "choice":agg, "timestamp":utc_timestamp()})
-                    existing_keys.add(k_agg)
-                    aggregates_added += 1
-        else:
-            aggregates_skipped += 1
+    # Close progress bars
+    pbar_gpt.close()
+    pbar_gemini.close()
+    pbar_claude.close()
 
+    # Final update and push
     if new_rows:
         existing_df = pd.concat([existing_df, pd.DataFrame(new_rows)], ignore_index=True)
 
@@ -499,22 +602,16 @@ def main():
     tmp = ANNOT_CSV_LOCAL.with_suffix(".tmp.csv")
     existing_df.to_csv(tmp, index=False)
     tmp.replace(ANNOT_CSV_LOCAL)
-    print(f"Saved updated annotations to {ANNOT_CSV_LOCAL}")
+    print(f"\nSaved updated annotations to {ANNOT_CSV_LOCAL}")
 
-    try:
-        api = HfApi()
-        create_repo(HF_REPO, repo_type="dataset", exist_ok=True, token=hf_token)
-        api.upload_file(
-            path_or_fileobj=str(ANNOT_CSV_LOCAL),
-            path_in_repo=HF_FILENAME,
-            repo_id=HF_REPO,
-            repo_type="dataset",
-            token=hf_token,
-            commit_message="Structured LLM votes (Gemini logic mirrored)"
-        )
-        print(f"Pushed {HF_FILENAME} to HF repo {HF_REPO}")
-    except Exception as e:
-        print(f"[WARN] Push failed: {e}")
+    # Final push if there are remaining annotations or if no incremental pushes were done
+    if annotations_since_push > 0 or (args.push_interval == 0 and new_rows):
+        if push_to_hf(existing_df, hf_token, 
+                     f"Final update: {len(new_rows)} total annotations added"):
+            total_pushes += 1
+            print(f"Final push: {HF_FILENAME} to HF repo {HF_REPO}")
+        else:
+            print(f"[WARN] Final push failed")
 
     print("\n=== Run Summary ===")
     for annot, d in per_llm_stats.items():
@@ -525,6 +622,8 @@ def main():
     for a in LLM_ANNOTATORS:
         print(f"  {a}: success={structured_success[a]} fail={structured_fail[a]}")
     print(f"New rows added (incl aggregate): {len(new_rows)}")
+    if args.push_interval > 0:
+        print(f"Total incremental pushes to HF: {total_pushes}")
     print("Done.")
 
 if __name__ == "__main__":
