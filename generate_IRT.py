@@ -26,6 +26,13 @@ MAX_RETRIES = 2
 RETRY_SLEEP_SEC = 2.0
 RANDOM_SEED = 42
 
+ # adjust to avoid 429s
+CONCURRENCY = 100
+async def _one(IRT, sem):
+    async with sem:
+        return IRT, await gemini_trans(model, IRT, translation_prompt)
+
+
 random.seed(RANDOM_SEED)
 
 # helpers to allow for deterministic hashing
@@ -45,15 +52,19 @@ def stable_hash(instruction, response):
 
 # translate EN=>GA prompt
 translation_prompt =    '''
-Translate the following English Instruction and prompt into Irish. response1 should be a direct translation,
-whereas response2 should be equally valid but differ in tone, meaning & syntax. It should be hard for a native Irish speaker to 
-pick the better answer.
+Translate the following English Instruction and response into Irish. 
+
+- response1 should be a natural, direct and fluent translation,
+- response2 should be a weak alternative, it should be  unhelpful, not idiomatic, inaccurate, awkward.
+
+- The contrast in quality of Irish should be very high. 
+
 OUTPUT FORMAT (STRICT):
 Return strict JSON with exactly:
 {{
 "instruction": "<instruction in Irish>",
-"response1": "<response in Irish>",
-"response2": "<response in Irish>"
+"response1": "<much better response in Irish>",
+"response2": "<much worse response in Irish>"
 }}
 The following is the English prompt-response pair: 
 '''
@@ -126,26 +137,29 @@ gcloud_location = "us-central1"
 vertexai.init(project=gemini_project_id, location=gcloud_location)
 
 
-with open (file_name, "a", encoding="utf-8") as f:  
-    to_process = IRT_ga[:args.num] if args.num else IRT_ga
-    for IRT in tqdm(to_process):
-        translated_IRT_ga = asyncio.run(gemini_trans(model, IRT, translation_prompt))
-        if translated_IRT_ga is None:
-            print("empty response")
-        else:
-            try:
-                translated_IRT_ga_json = json.loads(translated_IRT_ga)
-                # add original en prompt, response to line
-                translated_IRT_ga_json["instruction_en"] = IRT["instruction"]
-                translated_IRT_ga_json["response_en"] = IRT["response"]
-                # add hash for en pair to save in ouput file for cross-referencing.
-                hash_en = stable_hash(IRT["instruction"], IRT["response"])
-                translated_IRT_ga_json["hash"] = hash_en
+to_process = IRT_ga[:args.num] if args.num else IRT_ga
 
-                f.write(json.dumps(translated_IRT_ga_json, ensure_ascii=False) + "\n")
+async def main():
+    sem = asyncio.Semaphore(CONCURRENCY)
+    tasks = [_one(IRT, sem) for IRT in to_process]
+    with open(file_name, "a", encoding="utf-8") as f:
+        for fut in tqdm(asyncio.as_completed(tasks), total=len(tasks)):
+            IRT, translated = await fut
+            if not translated:
+                print("empty response")
+                continue
+            try:
+                obj = json.loads(translated)
+                obj["instruction_en"] = IRT["instruction"]
+                obj["response_en"] = IRT["response"]
+                obj["hash"] = IRT["hash"]
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
             except Exception as e:
-                print(f"JSON parse error: {e}")
-                print(f"Original response: {translated_IRT_ga}")
+                print("JSON parse error:", e)
+                print("Original response:", translated)
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 
