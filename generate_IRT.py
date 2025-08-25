@@ -6,7 +6,7 @@ Overview: create first of its kind instruction-tuning dataset for Irish using Ge
 # Use LIMA for seeding the Oireachtas and Wiki Questions ./LIMA.jsonl
 import json
 import vertexai
-from vertexai.preview.generative_models import GenerativeModel
+from vertexai.preview.generative_models import GenerativeModel, GenerationConfig
 import time
 from typing import Dict, List, Optional, Tuple
 import random
@@ -14,6 +14,7 @@ import os, json, time, random, hashlib, unicodedata, re
 from tqdm import tqdm
 import argparse
 import asyncio
+
 
 # limit for parsing for testing, then DPO subset, before full trans.
 p = argparse.ArgumentParser()
@@ -24,9 +25,6 @@ args = p.parse_args()
 MAX_RETRIES = 2
 RETRY_SLEEP_SEC = 2.0
 RANDOM_SEED = 42
-
-# limit number of thinking tokens for each request, default: 8192, max: 32768
-THINK_BUDGET = 8192 # keep default for now.
 
 random.seed(RANDOM_SEED)
 
@@ -60,13 +58,19 @@ Return strict JSON with exactly:
 The following is the English prompt-response pair: 
 '''
 
-output_format_reminder ='''OUTPUT FORMAT (STRICT):
-Return strict JSON with exactly:
-{{
-"instruction": "<instruction in Irish>",
-"response1": "<response in Irish>",
-"response2": "<response in Irish>"
-}}'''
+# force JSON response from gemini
+gen_cfg = GenerationConfig(
+    response_mime_type="application/json",
+    response_schema={
+        "type": "OBJECT",
+        "properties": {
+            "instruction": {"type": "STRING"},
+            "response1":    {"type": "STRING"},
+            "response2":    {"type": "STRING"},
+        },
+        "required": ["instruction", "response1", "response2"],
+        }
+)
 
 # Use LIMA for seeding the Oireachtas and Wiki Questions ./LIMA.jsonl
 IRT_ga = []
@@ -89,18 +93,18 @@ with open("LIMA.jsonl", "r", encoding="utf-8") as f:
         IRT_ga.append({"instruction": prompt, "response": response, "hash": stable_hash(prompt, response)})
 
 # to call Google API
-def gemini_trans(model: GenerativeModel, pair_en: dict, prompt: str) -> Optional[str]:
-    instruction_en = pair_en.get("instruction", "")
-    response_en = pair_en.get("response", "")
-    prompt = prompt + "\n\n" + "\n instruction_en: \n" + instruction_en + "\n response_en: \n" + response_en + "\n Reminder of output format: \n" + output_format_reminder
-    try:
-        response = model.aio.models.generate_content(prompt)
-        print(f"Gemini translation response: {response}")
-        return response.text or None
+async def gemini_trans(model: GenerativeModel, pair_en: dict, prompt: str) -> Optional[str]:
+          instruction_en = pair_en.get("instruction", "")
+          response_en = pair_en.get("response", "")
+          prompt = prompt + "\n\n" + "\n instruction_en: \n" + instruction_en + "\n response_en: \n" + response_en
+          try:
+              response = await model.generate_content_async(contents=prompt, generation_config=gen_cfg)
+              print(f"Gemini translation response: {response}")
+              return response.text or None
 
-    except:
-        print(f"Gemini translation failed")
-        return None
+          except:
+              print(f"Gemini translation failed")
+              return None
     
 
 model = GenerativeModel('gemini-2.5-pro')
@@ -125,14 +129,12 @@ vertexai.init(project=gemini_project_id, location=gcloud_location)
 with open (file_name, "a", encoding="utf-8") as f:  
     to_process = IRT_ga[:args.num] if args.num else IRT_ga
     for IRT in tqdm(to_process):
-        translated_IRT_ga = gemini_trans(model, IRT, translation_prompt)
+        translated_IRT_ga = asyncio.run(gemini_trans(model, IRT, translation_prompt))
         if translated_IRT_ga is None:
             print("empty response")
         else:
             try:
-                # gemini loves wrapping in markdown but can't parse that json directly.
-                translated_IRT_ga_clean = translated_IRT_ga.strip().removeprefix('```json\n').removesuffix('```')
-                translated_IRT_ga_json = json.loads(translated_IRT_ga_clean)
+                translated_IRT_ga_json = json.loads(translated_IRT_ga)
                 # add original en prompt, response to line
                 translated_IRT_ga_json["instruction_en"] = IRT["instruction"]
                 translated_IRT_ga_json["response_en"] = IRT["response"]
